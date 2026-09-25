@@ -1,0 +1,123 @@
+# =====================================================================
+#  Campagnes email — listmonk + PostgreSQL
+#
+#  Le client ne remplit que deux valeurs dans .env :
+#     SMTP_USER      = son adresse Gmail
+#     SMTP_PASSWORD  = son mot de passe d'application Google (16 caractères)
+#
+#  Tout le reste est automatique : création de la base, du compte
+#  administrateur, et branchement de la boîte Gmail dans listmonk.
+#
+#  Démarrage :  cp .env.example .env  (puis remplir)  &&  docker compose up -d
+# =====================================================================
+
+services:
+
+  # ── Base de données ─────────────────────────────────────────────────
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-listmonk}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD est obligatoire}
+      POSTGRES_DB: ${DB_NAME:-listmonk}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-listmonk} -d ${DB_NAME:-listmonk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── 1) Initialisation : schéma + compte administrateur ──────────────
+  # L'image officielle de listmonk n'exécute PAS l'installation toute
+  # seule : sans ce service, le conteneur redémarre en boucle avec
+  # « the database does not appear to be setup. Run --install. ».
+  # Ce service s'exécute une fois puis s'arrête.
+  init:
+    image: listmonk/listmonk:${LISTMONK_VERSION:-v6.2.0}
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LISTMONK_app__address: 0.0.0.0:9000
+      LISTMONK_db__host: db
+      LISTMONK_db__port: 5432
+      LISTMONK_db__user: ${DB_USER:-listmonk}
+      LISTMONK_db__password: ${DB_PASSWORD:?DB_PASSWORD est obligatoire}
+      LISTMONK_db__database: ${DB_NAME:-listmonk}
+      LISTMONK_db__ssl_mode: disable
+      LISTMONK_ADMIN_USER: ${ADMIN_USER:-admin}
+      LISTMONK_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD est obligatoire}
+    command:
+      - sh
+      - -c
+      - "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config ''"
+
+  # ── 2) Réglages : boîte Gmail du client, expéditeur, adresse publique ─
+  # Écrit directement les réglages dans la base, AVANT le démarrage de
+  # l'application : le client n'a donc rien à configurer dans l'interface.
+  smtp-seed:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: db
+      PGUSER: ${DB_USER:-listmonk}
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD est obligatoire}
+      PGDATABASE: ${DB_NAME:-listmonk}
+      SMTP_USER: ${SMTP_USER:?SMTP_USER est obligatoire}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD est obligatoire}
+      FROM_NAME: ${FROM_NAME:-Campagnes}
+      ROOT_URL: ${ROOT_URL:-http://localhost:9000}
+      SITE_NAME: ${SITE_NAME:-Campagnes email}
+      BOUNCE_ENABLED: ${BOUNCE_ENABLED:-false}
+    volumes:
+      - ./scripts/seed-settings.sql:/seed-settings.sql:ro
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        psql -v ON_ERROR_STOP=1
+        -v smtp_user="$SMTP_USER"
+        -v smtp_password="$SMTP_PASSWORD"
+        -v from_name="$FROM_NAME"
+        -v root_url="$ROOT_URL"
+        -v site_name="$SITE_NAME"
+        -v bounce_enabled="$BOUNCE_ENABLED"
+        -f /seed-settings.sql
+
+  # ── 3) Application ──────────────────────────────────────────────────
+  app:
+    image: listmonk/listmonk:${LISTMONK_VERSION:-v6.2.0}
+    restart: unless-stopped
+    depends_on:
+      smtp-seed:
+        condition: service_completed_successfully
+    environment:
+      # Sur Coolify, décommentez la ligne suivante et renseignez le domaine
+      # dans Configuration > Environment Variables (SERVICE_FQDN_APP_9000),
+      # puis reportez ce domaine dans ROOT_URL.
+      # SERVICE_FQDN_APP_9000: ""
+      LISTMONK_app__address: 0.0.0.0:9000
+      LISTMONK_app__root_url: ${ROOT_URL:-http://localhost:9000}
+      LISTMONK_db__host: db
+      LISTMONK_db__port: 5432
+      LISTMONK_db__user: ${DB_USER:-listmonk}
+      LISTMONK_db__password: ${DB_PASSWORD:?DB_PASSWORD est obligatoire}
+      LISTMONK_db__database: ${DB_NAME:-listmonk}
+      LISTMONK_db__ssl_mode: disable
+    command: ["./listmonk", "--config", ""]
+    volumes:
+      - uploads:/listmonk/uploads
+    # Sur un serveur sans reverse-proxy, décommentez pour exposer l'interface.
+    # Sur Coolify, ne publiez PAS de port : le proxy s'en charge.
+    # ports:
+    #   - "${APP_PORT:-9000}:9000"
+
+volumes:
+  db-data:
+  uploads:
