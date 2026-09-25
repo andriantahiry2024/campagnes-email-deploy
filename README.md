@@ -75,6 +75,11 @@ l'application, celle-ci garderait en mémoire le serveur SMTP par défaut.
    (Clé propre à Coolify : à ne pas laisser dans le fichier si vous déployez avec un simple
    `docker compose up` sur un serveur nu, Docker la refuserait.)
 
+**Après avoir renseigné ou modifié `SMTP_USER` / `SMTP_PASSWORD`, relancez un déploiement.**
+Le service `smtp-seed` rejoue et met à jour la boîte d'envoi dans listmonk — sans cela,
+l'application continuerait d'utiliser l'ancienne configuration (elle la charge en mémoire au
+démarrage).
+
 Le domaine doit exister dans le DNS (enregistrement `A` vers l'IP du serveur) **avant** la première
 émission du certificat, et le fournisseur ne doit pas bloquer le **port sortant 465** (certains
 hébergeurs le filtrent) : c'est ce port qui sert à joindre Gmail.
